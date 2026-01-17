@@ -5,48 +5,56 @@ import json
 import re
 from typing import Dict, List, Tuple
 
-# OSHB Psalm mapping (book 19 in OSHB)
-OSHB_BASE_URL = "https://raw.githubusercontent.com/openscriptures/morphhb/master/wlc/Ps.json"
+# Sefaria API endpoint for Psalms
+SEFARIA_API_BASE = "https://www.sefaria.org/api/texts/Psalms.{}"
 
 @st.cache_data
-def load_oshb_psalms():
-    """Load all Psalms from OSHB GitHub repository"""
+def load_psalm_from_sefaria(psalm_number: int) -> Dict:
+    """Load a specific Psalm from Sefaria API"""
     try:
-        response = requests.get(OSHB_BASE_URL, timeout=10)
+        url = SEFARIA_API_BASE.format(psalm_number)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
-        data = response.json()
-        return data
+        return response.json()
     except Exception as e:
-        st.error(f"Error loading OSHB data: {e}")
+        st.error(f"Error loading Psalm {psalm_number}: {e}")
         return None
 
-def parse_psalm(psalm_data: List, psalm_number: int) -> List[Dict]:
-    """Parse OSHB JSON data for a specific psalm into structured format"""
-    verses = []
+def parse_psalm_sefaria(sefaria_data: Dict, psalm_number: int) -> List[Dict]:
+    """Parse Sefaria API data into structured format"""
+    if not sefaria_data or 'he' not in sefaria_data:
+        return []
     
-    for verse_idx, verse in enumerate(psalm_data, 1):
-        hebrew_words = []
-        lemmas = []
+    verses = []
+    hebrew_verses = sefaria_data['he']
+    english_verses = sefaria_data.get('text', [])
+    
+    # Handle both single verse and multi-verse Psalms
+    if isinstance(hebrew_verses, str):
+        hebrew_verses = [hebrew_verses]
+    if isinstance(english_verses, str):
+        english_verses = [english_verses]
+    
+    for idx, hebrew_text in enumerate(hebrew_verses, 1):
+        # Clean HTML tags from Hebrew text
+        clean_hebrew = re.sub(r'<[^>]+>', '', hebrew_text)
         
-        for word in verse:
-            if len(word) >= 3:
-                word_text = word[0]  # Hebrew word
-                lemma = word[1] if len(word) > 1 else ""
-                morph = word[2] if len(word) > 2 else ""
-                
-                # Clean lemma (remove prefixes like 'a/', 'c/', etc.)
-                clean_lemma = re.sub(r'^[a-z]/', '', lemma) if lemma else ""
-                
-                hebrew_words.append(word_text)
-                if clean_lemma:
-                    lemmas.append((clean_lemma, word_text))
+        # Get corresponding English translation
+        english_text = ""
+        if idx <= len(english_verses):
+            english_text = re.sub(r'<[^>]+>', '', english_verses[idx-1])
         
-        # Join Hebrew words with spaces
-        hebrew_text = " ".join(hebrew_words)
+        # Extract individual Hebrew words for lemma analysis
+        hebrew_words = clean_hebrew.split()
+        
+        # For Sefaria data, we create simple lemmas from the words themselves
+        # (Sefaria doesn't provide morphological data in the basic API)
+        lemmas = [(word, word) for word in hebrew_words if word.strip()]
         
         verses.append({
-            "verse": verse_idx,
-            "hebrew": hebrew_text,
+            "verse": idx,
+            "hebrew": clean_hebrew,
+            "english": english_text,
             "hebrew_words": hebrew_words,
             "lemmas": lemmas
         })
@@ -58,12 +66,11 @@ def highlight_lemmas_in_text(hebrew_text: str, lemmas_to_highlight: List[str], c
     if not lemmas_to_highlight:
         return hebrew_text
     
-    # Create a pattern that matches any of the lemmas
     highlighted_text = hebrew_text
     for lemma in lemmas_to_highlight:
-        # Use word boundary to match whole words
-        pattern = f"({re.escape(lemma)})"
-        highlighted_text = re.sub(pattern, f'<mark style="background-color: {color}; padding: 2px 4px; border-radius: 3px;">\\1</mark>', highlighted_text)
+        if lemma.strip():
+            pattern = f"({re.escape(lemma)})"
+            highlighted_text = re.sub(pattern, f'<mark style="background-color: {color}; padding: 2px 4px; border-radius: 3px;">\\1</mark>', highlighted_text)
     
     return highlighted_text
 
@@ -77,18 +84,14 @@ def compute_pairings(psalm_data: List[Dict]) -> List[Dict]:
         v1 = psalm_data[i]
         v2 = psalm_data[n - 1 - i]
         
-        # Extract lemma IDs for comparison (just the Strong's-like number)
-        lemmas_1 = {lem[0] for lem in v1["lemmas"]}
-        lemmas_2 = {lem[0] for lem in v2["lemmas"]}
-        shared = lemmas_1 & lemmas_2
+        # Extract words for comparison
+        words_1 = set(word.strip() for word in v1["hebrew_words"] if word.strip())
+        words_2 = set(word.strip() for word in v2["hebrew_words"] if word.strip())
+        shared_words = words_1 & words_2
         
-        # Get shared lemma details with Hebrew forms
-        shared_details = []
-        shared_hebrew = []
-        for lem in v1["lemmas"]:
-            if lem[0] in shared:
-                shared_details.append(lem)
-                shared_hebrew.append(lem[1])
+        # Get shared word details
+        shared_details = [(word, word) for word in shared_words]
+        shared_hebrew = list(shared_words)
         
         pairs.append({
             "type": pair_type,
@@ -114,7 +117,7 @@ def compute_pairings(psalm_data: List[Dict]) -> List[Dict]:
 # Streamlit UI
 st.set_page_config(page_title="Psalm Chiasm Explorer", layout="wide")
 st.title("📖 Psalm Chiasm Explorer")
-st.markdown("*Exploring chiastic structures in Biblical Psalms with Hebrew lemma analysis*")
+st.markdown("*Exploring chiastic structures in Biblical Psalms with Hebrew text analysis*")
 
 # Sidebar controls
 with st.sidebar:
@@ -129,9 +132,10 @@ with st.sidebar:
     
     st.markdown("---")
     
-    min_lemmas = st.slider("Minimum shared lemmas to display", 0, 5, 0)
-    show_lemmas = st.checkbox("Show lemma details", value=True)
-    highlight_shared = st.checkbox("Highlight shared lemmas in text", value=True)
+    min_lemmas = st.slider("Minimum shared words to display", 0, 5, 0)
+    show_lemmas = st.checkbox("Show word details", value=True)
+    highlight_shared = st.checkbox("Highlight shared words in text", value=True)
+    show_english = st.checkbox("Show English translation", value=True)
     
     st.markdown("---")
     st.markdown("### About Chiasm")
@@ -141,107 +145,120 @@ with st.sidebar:
     
     The **center** often holds the theological key to the passage.
     
-    **Shared lemmas** are Hebrew root words that appear in both paired verses,
+    **Shared words** are Hebrew words that appear in both paired verses,
     suggesting intentional literary connections.
     """)
     
     st.markdown("---")
-    st.caption("📚 Data: Open Scriptures Hebrew Bible (OSHB)")
+    st.caption("📚 Data: Sefaria.org Hebrew Bible")
 
-# Load OSHB data
-with st.spinner("Loading Hebrew Bible data..."):
-    all_psalms = load_oshb_psalms()
+# Load Psalm data
+with st.spinner(f"Loading Psalm {psalm_number}..."):
+    sefaria_data = load_psalm_from_sefaria(psalm_number)
 
-if all_psalms and len(all_psalms) >= psalm_number:
-    # Parse the selected psalm (subtract 1 for 0-based index)
-    psalm_data = parse_psalm(all_psalms[psalm_number - 1], psalm_number)
+if sefaria_data:
+    psalm_data = parse_psalm_sefaria(sefaria_data, psalm_number)
     
-    st.markdown("---")
-    st.subheader(f"Psalm {psalm_number}")
-    st.caption(f"{len(psalm_data)} verses | Hebrew text from Westminster Leningrad Codex")
-    
-    if len(psalm_data) < 2:
-        st.warning("This Psalm is too short for chiastic analysis (requires at least 2 verses).")
+    if not psalm_data:
+        st.error("Failed to parse Psalm data. The Psalm may not be available.")
     else:
-        # Compute pairings
-        pairs = compute_pairings(psalm_data)
+        st.markdown("---")
+        st.subheader(f"Psalm {psalm_number}")
+        st.caption(f"{len(psalm_data)} verses | Hebrew text from Sefaria")
         
-        # Display pairs
-        for pair in pairs:
-            if len(pair["shared_lemmas"]) < min_lemmas and pair["type"] != "Center Hinge":
-                continue
+        if len(psalm_data) < 2:
+            st.warning("This Psalm is too short for chiastic analysis (requires at least 2 verses).")
+        else:
+            # Compute pairings
+            pairs = compute_pairings(psalm_data)
             
-            # Choose color based on type
-            if pair["type"] == "Outer Mirror":
-                bg_color = "#FFE4E1"  # Coral/peach
-                emoji = "🔴"
-            elif pair["type"] == "Quartile Echo":
-                bg_color = "#FFF8DC"  # Gold
-                emoji = "🟡"
-            else:  # Center Hinge
-                bg_color = "#E6E6FA"  # Lavender
-                emoji = "🟣"
-            
-            with st.container():
-                st.markdown(f"<div style='background-color: {bg_color}; padding: 1.5rem; border-radius: 10px; margin-bottom: 1.5rem;'>", unsafe_allow_html=True)
-                st.markdown(f"### {emoji} {pair['type']}")
+            # Display pairs
+            for pair in pairs:
+                if len(pair["shared_lemmas"]) < min_lemmas and pair["type"] != "Center Hinge":
+                    continue
                 
-                if pair["verse_2"] is not None:
-                    # Two-column layout for pairs
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.markdown(f"**Verse {pair['verse_1']['verse']}**")
-                        
-                        # Highlight shared lemmas if enabled
-                        if highlight_shared and pair["shared_hebrew"]:
-                            hebrew_highlighted = highlight_lemmas_in_text(
-                                pair['verse_1']['hebrew'], 
-                                pair['shared_hebrew']
-                            )
-                            st.markdown(f"*{hebrew_highlighted}*", unsafe_allow_html=True)
-                        else:
-                            st.markdown(f"*{pair['verse_1']['hebrew']}*")
-                    
-                    with col2:
-                        st.markdown(f"**Verse {pair['verse_2']['verse']}**")
-                        
-                        # Highlight shared lemmas if enabled
-                        if highlight_shared and pair["shared_hebrew"]:
-                            hebrew_highlighted = highlight_lemmas_in_text(
-                                pair['verse_2']['hebrew'], 
-                                pair['shared_hebrew']
-                            )
-                            st.markdown(f"*{hebrew_highlighted}*", unsafe_allow_html=True)
-                        else:
-                            st.markdown(f"*{pair['verse_2']['hebrew']}*")
-                    
-                    # Show shared lemmas
-                    if show_lemmas and pair["shared_lemmas"]:
-                        st.markdown(f"\n🏷️ **Shared lemmas ({len(pair['shared_lemmas'])})**")
-                        
-                        with st.expander("View lemma details"):
-                            lemma_df = pd.DataFrame(pair["shared_lemmas"], columns=["Lemma ID", "Hebrew Form"])
-                            st.table(lemma_df)
+                # Choose color based on type
+                if pair["type"] == "Outer Mirror":
+                    bg_color = "#FFE4E1"  # Coral/peach
+                    emoji = "🔴"
+                elif pair["type"] == "Quartile Echo":
+                    bg_color = "#FFF8DC"  # Gold
+                    emoji = "🟡"
+                else:  # Center Hinge
+                    bg_color = "#E6E6FA"  # Lavender
+                    emoji = "🟣"
                 
-                else:
-                    # Center verse (single column)
-                    st.markdown(f"**⭐ Verse {pair['verse_1']['verse']} — Theological Hinge ⭐**")
-                    st.markdown(f"*{pair['verse_1']['hebrew']}*")
-                    st.info("This central verse often contains the main theological point of the entire Psalm.")
-                
-                st.markdown("</div>", unsafe_allow_html=True)
+                with st.container():
+                    st.markdown(f"<div style='background-color: {bg_color}; padding: 1.5rem; border-radius: 10px; margin-bottom: 1.5rem;'>", unsafe_allow_html=True)
+                    st.markdown(f"### {emoji} {pair['type']}")
+                    
+                    if pair["verse_2"] is not None:
+                        # Two-column layout for pairs
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.markdown(f"**Verse {pair['verse_1']['verse']}**")
+                            
+                            # Highlight shared words if enabled
+                            if highlight_shared and pair["shared_hebrew"]:
+                                hebrew_highlighted = highlight_lemmas_in_text(
+                                    pair['verse_1']['hebrew'], 
+                                    pair['shared_hebrew']
+                                )
+                                st.markdown(f"*{hebrew_highlighted}*", unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"*{pair['verse_1']['hebrew']}*")
+                            
+                            if show_english and pair['verse_1'].get('english'):
+                                st.markdown(f"\n{pair['verse_1']['english']}")
+                        
+                        with col2:
+                            st.markdown(f"**Verse {pair['verse_2']['verse']}**")
+                            
+                            # Highlight shared words if enabled
+                            if highlight_shared and pair["shared_hebrew"]:
+                                hebrew_highlighted = highlight_lemmas_in_text(
+                                    pair['verse_2']['hebrew'], 
+                                    pair['shared_hebrew']
+                                )
+                                st.markdown(f"*{hebrew_highlighted}*", unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"*{pair['verse_2']['hebrew']}*")
+                            
+                            if show_english and pair['verse_2'].get('english'):
+                                st.markdown(f"\n{pair['verse_2']['english']}")
+                        
+                        # Show shared words
+                        if show_lemmas and pair["shared_lemmas"]:
+                            st.markdown(f"\n🏷️ **Shared words ({len(pair['shared_lemmas'])})**")
+                            
+                            with st.expander("View word details"):
+                                lemma_df = pd.DataFrame(pair["shared_lemmas"], columns=["Hebrew Word", "Word Form"])
+                                st.table(lemma_df)
+                    
+                    else:
+                        # Center verse (single column)
+                        st.markdown(f"**⭐ Verse {pair['verse_1']['verse']} — Theological Hinge ⭐**")
+                        st.markdown(f"*{pair['verse_1']['hebrew']}*")
+                        
+                        if show_english and pair['verse_1'].get('english'):
+                            st.markdown(f"\n{pair['verse_1']['english']}")
+                        
+                        st.info("This central verse often contains the main theological point of the entire Psalm.")
+                    
+                    st.markdown("</div>", unsafe_allow_html=True)
 else:
     st.error("❌ Failed to load Psalm data. Please check your internet connection or try again later.")
-    st.info("💡 The app fetches data from the Open Scriptures Hebrew Bible (OSHB) repository on GitHub.")
+    st.info("💡 The app fetches data from Sefaria.org, a comprehensive Jewish texts library.")
 
 st.markdown("---")
-st.markdown("### Next Steps")
+st.markdown("### Features")
 st.markdown("""
 - **✅ Psalm selector** – Choose any Psalm (1-150)
-- **✅ OSHB integration** – Live Hebrew text with lemma data
-- **✅ Lemma highlighting** – Shared words highlighted in yellow
-- **🔄 Coming soon**: English translation comparison, deeper semantic analysis
+- **✅ Sefaria integration** – Reliable Hebrew text and English translations
+- **✅ Word highlighting** – Shared words highlighted in yellow
+- **✅ English translations** – Toggle to show/hide English text
+- **🔄 Future**: Enhanced lemma analysis with morphological tagging
 """)
 
-st.caption("Built with Streamlit | Data: Open Scriptures Hebrew Bible (OSHB) | License: CC BY 4.0")
+st.caption("Built with Streamlit | Data: Sefaria.org | Text: CC BY-SA 4.0")
