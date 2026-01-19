@@ -90,4 +90,9 @@ class VerseIndex:
         """
         n = len(self.verse_list)
         return {
-            "first": self.verse
+            "first": self.verse_list[0],
+            "Q1": self.verse_list[n // 4],
+            "Q2_middle": self.verse_list[n // 2],
+            "Q3": self.verse_list[3 * n // 4],
+            "last": self.verse_list[n - 1]
+        }
